@@ -34,7 +34,7 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.log4j.Logger;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
-
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import com.splicemachine.access.configuration.HBaseConfiguration;
 import org.apache.hadoop.hbase.util.Bytes;
 import java.util.Collection;
@@ -210,15 +210,25 @@ public class BackupEndpointObserver extends BackupBaseRegionObserver implements 
     }
 
     @Override
-    public void postCompleteSplit(ObserverContext<RegionCoprocessorEnvironment> ctx) throws IOException {
+    public void postCompact(ObserverContext<RegionCoprocessorEnvironment> e, Store store, StoreFile resultFile, CompactionRequest request) throws IOException {
         try {
-            if (LOG.isDebugEnabled())
-                SpliceLogUtils.debug(LOG, "BackupEndpointObserver.postCompleteSplit(): %s", regionName);
-            super.postCompleteSplit(ctx);
-            isSplitting.set(false);
+            if (BackupUtils.isSpliceTable(namespace, tableName) &&
+                    BackupUtils.shouldCaptureIncrementalChanges(fs, rootDir) &&
+                    resultFile != null && request != null && request.getFiles().size() > 1) {
+                BackupUtils.updateIncrementalChangesAfterCompaction(tableName, regionName, resultFile.getFileInfo().getPath(), request.getFiles());
+
+                if (LOG.isDebugEnabled()) {
+                    String filePath = resultFile != null ? resultFile.getFileInfo().getFileStatus().getPath().toString() : null;
+                    SpliceLogUtils.debug(LOG, "Compaction result file %s", filePath);
+                }
+            }
         } catch (Throwable t) {
             throw CoprocessorUtils.getIOException(t);
         }
+        finally {
+            isCompacting.set(false);
+        }
+
     }
 
     @Override
@@ -294,6 +304,23 @@ public class BackupEndpointObserver extends BackupBaseRegionObserver implements 
 
     @Override
     public void postSplit(ObserverContext<RegionCoprocessorEnvironment> e ,Region l, Region r) throws IOException{
+        try {
+            if (!BackupUtils.isSpliceTable(namespace, tableName)||
+                    !BackupUtils.shouldCaptureIncrementalChanges(fs, rootDir)) {
+                return;
+            }
+            if (LOG.isDebugEnabled()) {
+                HRegion region = (HRegion)e.getEnvironment().getRegion();
+                SpliceLogUtils.debug(LOG, "split %s:%s into %s and %s",
+                        region.getRegionInfo().getTable().getNameAsString(),
+                        region.getRegionInfo().getEncodedName(), l.getRegionInfo().getEncodedName(),
+                        r.getRegionInfo().getEncodedName());
+            }
+            BackupUtils.updateIncrementalChangesAfterSplit(tableName, l, r);
+
+        } catch (Throwable t) {
+            throw CoprocessorUtils.getIOException(t);
+        }
     }
 
     @Override

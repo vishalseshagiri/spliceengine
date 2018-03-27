@@ -24,27 +24,166 @@ import com.splicemachine.si.constants.SIConstants;
 import com.splicemachine.si.impl.driver.SIDriver;
 import com.splicemachine.utils.SpliceLogUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.*;
 import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.regionserver.HRegion;
-import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
+import org.apache.hadoop.hbase.regionserver.*;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
 import org.apache.log4j.Logger;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.Stat;
+import org.spark_project.guava.collect.Lists;
 
 import java.io.IOException;
 import java.sql.Timestamp;
+import java.util.Collection;
+import java.util.List;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * Created by jyuan on 8/10/16.
  */
 public class BackupUtils {
     private static final Logger LOG=Logger.getLogger(BackupUtils.class);
+
+    public static void updateIncrementalChangesAfterSplit(String tableName, Region l, Region r) throws IOException, StandardException {
+
+        // Get all store files from child regions
+        Store lStore = l.getStore(SIConstants.DEFAULT_FAMILY_BYTES);
+        Store rStore = r.getStore(SIConstants.DEFAULT_FAMILY_BYTES);
+        Collection<StoreFile> lStoreFiles = lStore.getStorefiles();
+        Collection<StoreFile> rStoreFiles = rStore.getStorefiles();
+        Collection<StoreFile> storeFiles = Lists.newArrayList();
+        storeFiles.addAll(lStoreFiles);
+        storeFiles.addAll(rStoreFiles);
+        Configuration conf = HConfiguration.unwrapDelegate();
+        FileSystem fs = FSUtils.getCurrentFileSystem(conf);
+        String rootDir = FSUtils.getRootDir(conf).toString();
+        Path backupPath = new Path(rootDir, BackupRestoreConstants.BACKUP_DIR);
+        Path backupMetaPath = new Path(backupPath, BackupRestoreConstants.BACKUP_DATA_DIR);
+        Path namespacePath = new Path(backupMetaPath, HConfiguration.getConfiguration().getNamespace());
+        Path tablePath = new Path(namespacePath, tableName);
+
+        updateIncrementalChangesForChild(conf, fs, l, tablePath, lStoreFiles);
+        updateIncrementalChangesForChild(conf, fs, r, tablePath, rStoreFiles);
+
+        // unregister parent HFile from incremental backup
+        for (StoreFile storeFile : storeFiles) {
+            String name = storeFile.getPath().getName();
+            String[] ns = name.split("\\.");
+            Path parentRegionPath = new Path(tablePath, ns[1]);
+            Path parentFamilyPath = new Path(parentRegionPath, SIConstants.DEFAULT_FAMILY_NAME);
+            Path parentFilePath = new Path(parentFamilyPath, ns[0]);
+            if (fs.exists(parentFilePath)) {
+                fs.delete(parentFilePath, true);
+            }
+        }
+    }
+
+    /**
+     * For each store file in child regions, register it for incremental backup if the parent HFile is registered
+     * for incremental backup. The store files in child regions are reference files, which will be materialized
+     * by next compaction or incremental backup
+     * @param conf
+     * @param fs
+     * @param r
+     * @param tablePath
+     * @param storeFiles
+     * @throws IOException
+     * @throws StandardException
+     */
+    private static void updateIncrementalChangesForChild(Configuration conf, FileSystem fs, Region r,
+                                                         Path tablePath, Collection<StoreFile> storeFiles)
+                                                                                throws IOException, StandardException {
+        for (StoreFile storeFile : storeFiles) {
+            Path p = storeFile.getPath();
+            String name = p.getName();
+            String regionName = p.getParent().getParent().getName();
+            Path regionPath = new Path(tablePath, regionName);
+
+            String[] ns = name.split("\\.");
+            Path parentRegionPath = new Path(tablePath, ns[1]);
+            Path parentFamilyPath = new Path(parentRegionPath, SIConstants.DEFAULT_FAMILY_NAME);
+            Path parentFilePath = new Path(parentFamilyPath, ns[0]);
+            if (fs.exists(parentFilePath)) {
+                registerHFile(conf, fs, regionPath, r, name);
+            }
+        }
+    }
+
+    public static void updateIncrementalChangesAfterCompaction(String tableName,
+                                                               String regionName,
+                                                               Path resultFile,
+                                                               Collection<StoreFile> requestFiles) throws IOException {
+
+        Configuration conf = HConfiguration.unwrapDelegate();
+        FileSystem fs = FSUtils.getCurrentFileSystem(conf);
+        String rootDir = FSUtils.getRootDir(conf).toString();
+        Path backupPath = new Path(rootDir, BackupRestoreConstants.BACKUP_DIR);
+        Path backupMetaPath = new Path(backupPath, BackupRestoreConstants.BACKUP_DATA_DIR);
+        Path namespacePath = new Path(backupMetaPath, HConfiguration.getConfiguration().getNamespace());
+        Path tablePath = new Path(namespacePath, tableName);
+        Path regionPath = new Path(tablePath, regionName);
+        Path familyPath = new Path(regionPath, SIConstants.DEFAULT_FAMILY_NAME);
+
+        // Get a list of file path to register
+        List<Path> pathList =  requestFiles.stream().map(new Function<StoreFile, Path>() {
+            @Override
+            public Path apply(StoreFile storeFile) {
+                String fileName = storeFile.getPath().getName();
+                return new Path(familyPath, fileName);
+            }
+        }).collect(Collectors.toList());
+
+        // Register the result file if all request files were registered for incremental backup
+        boolean shouldUpdate = true;
+        for (Path p : pathList) {
+            if (!fs.exists(p)) {
+                shouldUpdate = false;
+                break;
+            }
+        }
+
+        Path r = new Path(familyPath, resultFile.getName());
+        Path tempPath = null;
+        try {
+            if (shouldUpdate) {
+                // create a temp directory and move all file to it
+                tempPath = new Path(familyPath, "tmp");
+                fs.mkdirs(tempPath);
+                for (Path p:pathList) {
+                    fs.rename(p, new Path(tempPath, p.getName()));
+                    if (LOG.isDebugEnabled()) {
+                        SpliceLogUtils.debug(LOG, "unregistered HFile %s for incremental backup", p.toString());
+                    }
+                }
+
+                FSDataOutputStream os = fs.create(r);
+                os.close();
+                fs.delete(tempPath, true);
+                if (LOG.isDebugEnabled()) {
+                    SpliceLogUtils.debug(LOG, "registered compaction result HFile %s for incremental backup", r.toString());
+                }
+            }
+        }catch (Exception e) {
+            // restore files from temp directory
+            SpliceLogUtils.info(LOG, "Encountered an exception %s when regionstering compaction result file %s for " +
+                    "incremental backup", e.getCause(), r.toString());
+            if (tempPath != null && fs.exists(tempPath)) {
+                FileStatus[] statuses = fs.listStatus(tempPath);
+                for (FileStatus fileStatus : statuses) {
+                    Path src = fileStatus.getPath();
+                    String fileName = src.getName();
+                    Path dest = new Path(familyPath, fileName);
+                    fs.rename(src, dest);
+                    SpliceLogUtils.info(LOG,"rename %s to %s", src.toString(), dest.toString());
+                }
+                fs.delete(tempPath, true);
+            }
+        }
+    }
 
     public static boolean backupInProgress() throws Exception {
         String path = HConfiguration.getConfiguration().getBackupPath();
@@ -184,10 +323,12 @@ public class BackupUtils {
     public static boolean shouldCaptureIncrementalChanges(FileSystem fs,Path rootDir) throws StandardException{
         boolean shouldRegister = false;
         try {
+
+            boolean enabled = incrementalBackupEnabled();
             RecoverableZooKeeper zooKeeper = ZkUtils.getRecoverableZooKeeper();
             String spliceBackupPath = HConfiguration.getConfiguration().getBackupPath();
             boolean isRestoreMode = SIDriver.driver().lifecycleManager().isRestoreNode();
-            if (!isRestoreMode) {
+            if (enabled && !isRestoreMode) {
                 if (BackupUtils.existsDatabaseBackup(fs, rootDir)) {
                     if (LOG.isDebugEnabled()) {
                         SpliceLogUtils.debug(LOG, "There exists a successful full or incremental backup in the system");
@@ -208,6 +349,15 @@ public class BackupUtils {
             throw StandardException.plainWrapException(e);
         }
     }
+
+    public static boolean incrementalBackupEnabled() {
+        Configuration conf = HConfiguration.unwrapDelegate();
+        String fileCleaners = conf.get("hbase.master.hfilecleaner.plugins");
+        String spliceHFileCleanerName = SpliceHFileCleaner.class.getName();
+        boolean incrementalBackupEnabled = fileCleaners.contains(spliceHFileCleanerName);
+        return incrementalBackupEnabled;
+    }
+
     /**
      * Is this a splice managed table?
      * A table is managed by splice if its namespace is "splice", or it's
@@ -246,7 +396,7 @@ public class BackupUtils {
     public static void registerHFile(Configuration conf,
                                       FileSystem fs,
                                       Path backupDir,
-                                      HRegion region,
+                                      Region region,
                                       String fileName) throws StandardException {
 
         FSDataOutputStream out = null;
@@ -268,11 +418,12 @@ public class BackupUtils {
             out = fs.create(p);
         }
         catch (Exception e) {
-            throw Exceptions.parseException(e);
+            throw StandardException.plainWrapException(e);
         }
         finally {
             try {
-                out.close();
+                if (out !=null)
+                    out.close();
             }
             catch (Exception e) {
                 throw Exceptions.parseException(e);
