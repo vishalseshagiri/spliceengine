@@ -48,6 +48,7 @@ import java.util.Vector;
  * Date: 6/10/13
  */
 public abstract class HashableJoinStrategy extends BaseJoinStrategy {
+    protected boolean missingHashKeyOK = false;
     public HashableJoinStrategy() {
     }
 
@@ -56,10 +57,12 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
                             OptimizablePredicateList predList,
                             Optimizer optimizer,
                             CostEstimate outerCost,
-                            boolean wasHinted) throws StandardException {
+                            boolean wasHinted,
+                            boolean skipKeyCheck) throws StandardException {
         int[] hashKeyColumns;
         ConglomerateDescriptor cd = null;
-        OptimizerTrace tracer=optimizer.tracer();
+        OptimizerTrace tracer = optimizer.tracer();
+        this.missingHashKeyOK = false;
 
 		/* If the innerTable is a VTI, then we must check to see if there are any
 		 * join columns in the VTI's parameters.  If so, then hash join is not feasible.
@@ -133,22 +136,28 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
         }
         */
         if (innerTable.isBaseTable()) {
-			/* Must have an equijoin on a column in the conglomerate */
+            /* Must have an equijoin on a column in the conglomerate */
             cd = innerTable.getCurrentAccessPath().getConglomerateDescriptor();
         }
 
-		/* Look for equijoins in the predicate list */
-        hashKeyColumns = findHashKeyColumns(innerTable,cd,predList);
+        /* Look for equijoins in the predicate list */
+        hashKeyColumns = findHashKeyColumns(innerTable, cd, predList);
 
         if (SanityManager.DEBUG) {
             if (hashKeyColumns == null) {
-                tracer.trace(OptimizerFlag.HJ_SKIP_NO_JOIN_COLUMNS,0,0,0.0,null);
-            }
-            else {
-                tracer.trace(OptimizerFlag.HJ_HASH_KEY_COLUMNS,0,0,0.0,hashKeyColumns);
+                if (skipKeyCheck)
+                    tracer.trace(OptimizerFlag.HJ_NO_EQUIJOIN_COLUMNS, 0, 0, 0.0, null);
+                else
+                    tracer.trace(OptimizerFlag.HJ_SKIP_NO_JOIN_COLUMNS, 0, 0, 0.0, null);
+            } else {
+                tracer.trace(OptimizerFlag.HJ_HASH_KEY_COLUMNS, 0, 0, 0.0, hashKeyColumns);
             }
         }
-
+        if (skipKeyCheck) {
+            if (hashKeyColumns == null)
+                missingHashKeyOK = true;
+            return true;
+        }
         return hashKeyColumns!=null;
     }
 
@@ -415,7 +424,7 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
         if (hashKeyColumns != null) {
             innerTable.setHashKeyColumns(hashKeyColumns);
         }
-        else {
+        else if (!missingHashKeyOK){
             String name;
             if (cd != null && cd.isIndex()) {
                 name = cd.getConglomerateName();
@@ -425,9 +434,17 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
             }
             throw StandardException.newException(SQLState.LANG_HASH_NO_EQUIJOIN_FOUND, name, innerTable.getBaseTableName());
         }
+        // Even if hashKeyColumns are null, they should be set, as this is
+        // the case with no equality join conditions, which is now supported
+        // by broadcast join.
+        innerTable.setHashKeyColumns(hashKeyColumns);
 
         // Mark all of the predicates in the probe list as qualifiers
         nonStoreRestrictionList.markAllPredicatesQualifiers();
+
+        // The remaining logic deals with hash key columns, so exist if none were found.
+        if (hashKeyColumns == null)
+            return;
 
         int[] conglomColumn = new int[hashKeyColumns.length];
         if (cd != null && cd.isIndex()) {
@@ -558,4 +575,8 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
 
     /** @see JoinStrategy#halfOuterJoinResultSetMethodName */
     public abstract String halfOuterJoinResultSetMethodName();
+
+    // Is it OK for this hash-based join strategy to execute without
+    // a hash key (without any equality join conditions).
+    public boolean isMissingHashKeyOK() {return false;}
 }
