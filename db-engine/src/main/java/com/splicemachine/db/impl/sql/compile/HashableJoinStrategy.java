@@ -421,10 +421,8 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
                 hashTableFor = (Optimizable) (prn.getChildResult());
         }
         int[] hashKeyColumns = findHashKeyColumns(hashTableFor, cd, nonStoreRestrictionList);
-        if (hashKeyColumns != null) {
-            innerTable.setHashKeyColumns(hashKeyColumns);
-        }
-        else if (!missingHashKeyOK){
+
+        if (hashKeyColumns == null && !missingHashKeyOK){
             String name;
             if (cd != null && cd.isIndex()) {
                 name = cd.getConglomerateName();
@@ -434,16 +432,16 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
             }
             throw StandardException.newException(SQLState.LANG_HASH_NO_EQUIJOIN_FOUND, name, innerTable.getBaseTableName());
         }
-        // Even if hashKeyColumns are null, they should be set, as this is
-        // the case with no equality join conditions, which is now supported
-        // by broadcast join.
+        else
+            hashKeyColumns = new int[0];  // To designate there is no hash key: inequality join
+
         innerTable.setHashKeyColumns(hashKeyColumns);
 
         // Mark all of the predicates in the probe list as qualifiers
         nonStoreRestrictionList.markAllPredicatesQualifiers();
 
-        // The remaining logic deals with hash key columns, so exist if none were found.
-        if (hashKeyColumns == null)
+        // The remaining logic deals with hash key columns, so exit if none were found.
+        if (hashKeyColumns.length == 0)
             return;
 
         int[] conglomColumn = new int[hashKeyColumns.length];
