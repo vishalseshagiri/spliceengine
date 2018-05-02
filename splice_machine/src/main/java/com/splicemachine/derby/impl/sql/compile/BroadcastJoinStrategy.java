@@ -21,7 +21,6 @@ import com.splicemachine.db.iapi.sql.compile.*;
 import com.splicemachine.db.iapi.sql.dictionary.ConglomerateDescriptor;
 import com.splicemachine.db.impl.sql.compile.FromBaseTable;
 import com.splicemachine.db.impl.sql.compile.HashableJoinStrategy;
-import com.splicemachine.db.impl.sql.compile.RowResultSetNode;
 import com.splicemachine.db.impl.sql.compile.SelectivityUtil;
 
 public class BroadcastJoinStrategy extends HashableJoinStrategy {
@@ -80,8 +79,8 @@ public class BroadcastJoinStrategy extends HashableJoinStrategy {
                             CostEstimate outerCost,
                             boolean wasHinted,
                             boolean skipKeyCheck) throws StandardException {
-        boolean hashFeasible = super.feasible(innerTable,predList,optimizer,outerCost,wasHinted,
-                                              !(innerTable instanceof RowResultSetNode));
+        boolean hashFeasible = super.feasible(innerTable,predList,optimizer,outerCost,wasHinted,true);
+
         if(!hashFeasible) return false;
 
         /* Currently BroadcastJoin does not work with a right side IndexRowToBaseRowOperation */

@@ -153,9 +153,17 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
                 tracer.trace(OptimizerFlag.HJ_HASH_KEY_COLUMNS, 0, 0, 0.0, hashKeyColumns);
             }
         }
-        if (skipKeyCheck) {
-            if (hashKeyColumns == null)
-                missingHashKeyOK = true;
+        // Allow inequality join if we're skipping the key check and this is
+        // truly a join (number of relations > 1).
+        // Also don't allow a VALUES list, eg. select * from (values ('a'), ('b') ... ('z')) mytab,
+        // constructed with UnionNodes and RowResultSetNodes, to be misconstrued as a join.
+        if (hashKeyColumns == null &&
+            skipKeyCheck && optimizer instanceof OptimizerImpl       &&
+            ((OptimizerImpl)optimizer).proposedJoinOrder.length >= 2 &&
+            !(innerTable instanceof RowResultSetNode                 &&
+            !(innerTable instanceof SetOperatorNode))) {
+
+            missingHashKeyOK = true;
             return true;
         }
         return hashKeyColumns!=null;
