@@ -286,6 +286,7 @@ public abstract class FromTable extends ResultSetNode implements Optimizable{
         JoinStrategy joinStrategy=currentAccessPath.getJoinStrategy();
         ap.setJoinStrategy(joinStrategy);
         ap.setHintedJoinStrategy(currentAccessPath.isHintedJoinStrategy());
+        ap.setMissingHashKeyOK(joinStrategy.isMissingHashKeyOK());
 
         OptimizerTrace tracer=optimizer.tracer();
         tracer.trace(OptimizerFlag.REMEMBERING_JOIN_STRATEGY,tableNumber,0,0.0,joinStrategy);

@@ -358,6 +358,7 @@ public class BroadcastJoinIT extends SpliceUnitTest {
         "left outer join tab3 --splice-properties useSpark=%s,joinStrategy=broadcast\n" +
         "on tab2.a between tab3.a - 1 and tab3.a and tab2.a in (1, 3, 5)", useSpark, useSpark);
 
+
         rs = classWatcher.executeQuery(sqlText);
         Assert.assertTrue("count(*) did not return the correct number of records!",rs.next());
         Assert.assertEquals("Wrong Count", 11, rs.getInt(1));

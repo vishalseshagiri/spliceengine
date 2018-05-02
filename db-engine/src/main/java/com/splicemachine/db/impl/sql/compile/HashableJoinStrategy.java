@@ -48,7 +48,9 @@ import java.util.Vector;
  * Date: 6/10/13
  */
 public abstract class HashableJoinStrategy extends BaseJoinStrategy {
+
     protected boolean missingHashKeyOK = false;
+
     public HashableJoinStrategy() {
     }
 
@@ -157,10 +159,14 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
         // truly a join (number of relations > 1).
         // Also don't allow a VALUES list, eg. select * from (values ('a'), ('b') ... ('z')) mytab,
         // constructed with UnionNodes and RowResultSetNodes, to be misconstrued as a join.
-        if (hashKeyColumns == null &&
-            skipKeyCheck && optimizer instanceof OptimizerImpl       &&
-            ((OptimizerImpl)optimizer).proposedJoinOrder.length >= 2 &&
-            !(innerTable instanceof RowResultSetNode                 &&
+        // The same conditions as in NestedLoopJoinStrategy.feasible are added for safety.
+        // Could these be removed in the future?
+        if (hashKeyColumns == null                         &&
+            skipKeyCheck                                   &&
+            (innerTable.isMaterializable() ||
+             innerTable.supportsMultipleInstantiations())  &&
+            optimizer instanceof OptimizerImpl             &&
+            !(innerTable instanceof RowResultSetNode       &&
             !(innerTable instanceof SetOperatorNode))) {
 
             missingHashKeyOK = true;
@@ -430,7 +436,7 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
         }
         int[] hashKeyColumns = findHashKeyColumns(hashTableFor, cd, nonStoreRestrictionList);
 
-        if (hashKeyColumns == null && !missingHashKeyOK){
+        if (hashKeyColumns == null && !innerTable.getTrulyTheBestAccessPath().isMissingHashKeyOK()){
             String name;
             if (cd != null && cd.isIndex()) {
                 name = cd.getConglomerateName();
@@ -582,7 +588,4 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
     /** @see JoinStrategy#halfOuterJoinResultSetMethodName */
     public abstract String halfOuterJoinResultSetMethodName();
 
-    // Is it OK for this hash-based join strategy to execute without
-    // a hash key (without any equality join conditions).
-    public boolean isMissingHashKeyOK() {return false;}
 }
