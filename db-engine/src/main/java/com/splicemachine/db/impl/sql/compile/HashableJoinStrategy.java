@@ -166,8 +166,8 @@ public abstract class HashableJoinStrategy extends BaseJoinStrategy {
             (innerTable.isMaterializable() ||
              innerTable.supportsMultipleInstantiations())  &&
             optimizer instanceof OptimizerImpl             &&
-            !(innerTable instanceof RowResultSetNode       &&
-            !(innerTable instanceof SetOperatorNode))) {
+            !(innerTable instanceof RowResultSetNode)      &&
+            !(innerTable instanceof SetOperatorNode)) {
 
             missingHashKeyOK = true;
             return true;
