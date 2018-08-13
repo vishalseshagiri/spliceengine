@@ -59,7 +59,6 @@ import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.sql.*;
-import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import scala.Tuple2;
@@ -317,6 +316,7 @@ public class SparkDataSetProcessor implements DistributedDataSetProcessor, Seria
                 // Infer schema from external files\
                 StructType dataSchema = ExternalTableUtils.getDataSchema(this, tableSchema, partitionColumnMap, location, "p");
 
+                SpliceSpark.getSession().sql("set spark.sql.parquet.filterPushdown=true");
                 table = SpliceSpark.getSession()
                         .read()
                         .schema(dataSchema)
@@ -603,42 +603,75 @@ public class SparkDataSetProcessor implements DistributedDataSetProcessor, Seria
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
     @Override
-    public <V> DataSet<V> readORCFile(int[] baseColumnMap,int[] partitionColumnMap, String location,
+    public <V> DataSet<V> readORCFile(StructType tableSchema, int[] baseColumnMap,int[] partitionColumnMap, String location,
                                           OperationContext context, Qualifier[][] qualifiers,
                                       DataValueDescriptor probeValue, ExecRow execRow,
                                       boolean useSample, double sampleFraction, boolean statsjob) throws StandardException {
         assert baseColumnMap != null:"baseColumnMap Null";
         assert partitionColumnMap != null:"partitionColumnMap Null";
+        Dataset<Row> table = null;
         try {
             String[] files = ImportUtils.getFileSystem(location).getExistingFiles(location, "*");
             if (files.length == 1 && files[0].equals("_SUCCESS")) // Handle Empty Directory
                 return getEmpty();
 
-            SpliceORCPredicate predicate = new SpliceORCPredicate(qualifiers,baseColumnMap,execRow.createStructType(baseColumnMap));
+            SpliceORCPredicate predicate = new SpliceORCPredicate(qualifiers, baseColumnMap, execRow.createStructType(baseColumnMap));
             Configuration configuration = new Configuration(HConfiguration.unwrapDelegate());
-            configuration.set(SpliceOrcNewInputFormat.SPLICE_PREDICATE,predicate.serialize());
-            configuration.set(SpliceOrcNewInputFormat.SPARK_STRUCT,execRow.createStructType(baseColumnMap).json());
-            configuration.set(SpliceOrcNewInputFormat.SPLICE_COLUMNS,intArrayToString(baseColumnMap));
-            configuration.set(SpliceOrcNewInputFormat.SPLICE_PARTITIONS,intArrayToString(partitionColumnMap));
+            configuration.set(SpliceOrcNewInputFormat.SPLICE_PREDICATE, predicate.serialize());
+            configuration.set(SpliceOrcNewInputFormat.SPARK_STRUCT, execRow.createStructType(baseColumnMap).json());
+            configuration.set(SpliceOrcNewInputFormat.SPLICE_COLUMNS, intArrayToString(baseColumnMap));
+            configuration.set(SpliceOrcNewInputFormat.SPLICE_PARTITIONS, intArrayToString(partitionColumnMap));
             if (statsjob)
                 configuration.set(SpliceOrcNewInputFormat.SPLICE_COLLECTSTATS, "true");
 
-            JavaRDD<Row> rows = SpliceSpark.getContext().newAPIHadoopFile(
-                    location,
-                    SpliceOrcNewInputFormat.class,
-                    NullWritable.class,
-                    Row.class,
-                    configuration)
-                            .values();
+            // Infer schema from external files\
+            if (tableSchema != null) {
+//                StructType dataSchema = null;
+//                try {
+//                    dataSchema = ExternalTableUtils.getDataSchema(this, tableSchema, partitionColumnMap, location, "p");
+//                } catch (Exception e) {
+//                    return handleExceptionInCaseOfEmptySet(e, location);
+//                }
+                SpliceSpark.getSession().sql("set spark.sql.orc.filterPushdown=true");
+                table = SpliceSpark.getSession()
+                .read()
+                .schema(tableSchema)
+                .orc(location);
 
-            if (useSample) {
-                return new SparkDataSet(rows.sample(false,sampleFraction).map(new RowToLocatedRowFunction(context, execRow)));
+                ExternalTableUtils.sortColumns(table.schema().fields(), partitionColumnMap);
+                table = processExternalDataset(table, baseColumnMap, qualifiers, probeValue);
+
+                if (useSample) {
+                    return new SparkDataSet(table
+                    .rdd().toJavaRDD()
+                    .sample(false, sampleFraction)
+                    .map(new RowToLocatedRowFunction(context, execRow)));
+                } else {
+                    return new SparkDataSet(table
+                    .rdd().toJavaRDD()
+                    .map(new RowToLocatedRowFunction(context, execRow)));
+                }
+
             } else {
-                return new SparkDataSet(rows.map(new RowToLocatedRowFunction(context, execRow)));
+                JavaRDD<Row> rows = SpliceSpark.getContext().
+                newAPIHadoopFile(
+                location,
+                SpliceOrcNewInputFormat.class,
+                NullWritable.class,
+                Row.class,
+                configuration)
+                .values();
+
+                if (useSample) {
+                    return new SparkDataSet(rows.sample(false, sampleFraction).map(new RowToLocatedRowFunction(context, execRow)));
+                } else {
+                    return new SparkDataSet(rows.map(new RowToLocatedRowFunction(context, execRow)));
+                }
             }
-        } catch (Exception e) {
+        }
+        catch (Exception e) {
             throw StandardException.newException(
-                    SQLState.EXTERNAL_TABLES_READ_FAILURE,e.getMessage());
+            SQLState.EXTERNAL_TABLES_READ_FAILURE, e.getMessage());
         }
     }
 

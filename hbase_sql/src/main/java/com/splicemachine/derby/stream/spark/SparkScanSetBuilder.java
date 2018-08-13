@@ -93,7 +93,7 @@ public class SparkScanSetBuilder<V> extends TableScannerBuilder<V> {
             }
             else if (storedAs.equals("O"))
 
-                locatedRows = dsp.readORCFile(baseColumnMap,partitionByColumns,location,operationContext,qualifiers,null,execRow, useSample, sampleFraction, false);
+                locatedRows = dsp.readORCFile(schema, baseColumnMap,partitionByColumns,location,operationContext,qualifiers,null,execRow, useSample, sampleFraction, false);
             else {
                 throw new UnsupportedOperationException("storedAs Type not supported -> " + storedAs);
             }
