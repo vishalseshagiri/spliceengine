@@ -14,10 +14,6 @@
 
 package com.splicemachine.timestamp.hbase;
 
-import com.splicemachine.timestamp.api.TimestampIOException;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
-import org.apache.log4j.Logger;
 import com.splicemachine.access.HConfiguration;
 import com.splicemachine.access.api.SConfiguration;
 import com.splicemachine.access.hbase.HBaseConnectionFactory;
@@ -25,6 +21,14 @@ import com.splicemachine.timestamp.api.TimestampSource;
 import com.splicemachine.timestamp.impl.TimestampClient;
 import com.splicemachine.timestamp.impl.TimestampServer;
 import com.splicemachine.utils.SpliceLogUtils;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
+import org.apache.log4j.Logger;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Timestamp source implementation that utilizes a special purpose service
@@ -42,44 +46,76 @@ public class ZkTimestampSource implements TimestampSource {
     private RecoverableZooKeeper _rzk;
     private volatile TimestampClient _tc = null;
     private String rootZkPath;
+    private SConfiguration _config = null;
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
+    private final Lock r = lock.readLock();
+    private final Lock w = lock.writeLock();
+    private static final TimeUnit lockWaitTimeUnits = TimeUnit.MINUTES;
+    private static final long numLockWaitTimeUnits = 3;
 
     public ZkTimestampSource(SConfiguration config,RecoverableZooKeeper rzk) {
         _rzk = rzk;
-        initialize(config);
+        initialize(config, false);
     }
     
-    private void initialize(SConfiguration config) {
+    private void initialize(SConfiguration config, boolean getReadLock) {
     	// We synchronize because we only want one instance of TimestampClient
     	// per region server, each of which handles multiple concurrent requests.
     	// Should be fine since synchronization occurs on the server.
-    	synchronized(this) {
-    		if (_tc == null) {
+        try {
+            if (!w.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
+                throw new RuntimeException("Unable to acquire lock for TimestampClient.");
+            if (_tc == null) {
                 rootZkPath = config.getSpliceRootPath();
                 int timeout = config.getTimestampClientWaitTime();
                 int timestampPort = config.getTimestampServerBindPort();
-		    	LOG.info("Creating the TimestampClient...");
+                LOG.info("Creating the TimestampClient...");
                 HBaseConnectionFactory hbcf = HBaseConnectionFactory.getInstance(config);
                 _tc = new TimestampClient(timeout,
-                        new HBaseTimestampHostProvider(hbcf,timestampPort));
-    		}
-    	}
+                new HBaseTimestampHostProvider(hbcf, timestampPort));
+                _config = config;
+            }
+        }
+        catch (InterruptedException e) {
+            LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
+        }
+        finally {
+            if (getReadLock) {
+                // Downgrade to a read lock without releasing the write lock.
+                r.lock();
+            }
+            else
+                w.unlock();
+        }
     }
     
-    protected TimestampClient getTimestampClient() {
+    protected TimestampClient getTimestampClient(boolean getReadLock) {
         if (_tc == null) {
-            LOG.error("The timestamp source has been closed.");
-            throw new RuntimeException("The timestamp source has been closed.");
+            initialize(_config, getReadLock);
+            //LOG.error("The timestamp source has been closed.");
+            //throw new RuntimeException("The timestamp source has been closed.");
+        }
+        else {
+            try {
+                if (!r.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
+                    throw new RuntimeException("Unable to acquire lock for TimestampClient.");
+            }
+            catch (InterruptedException e) {
+                LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
+            }
         }
     	return _tc;
     }
     
     @Override
     public long nextTimestamp() {
-		TimestampClient client = getTimestampClient();
 				
 		long nextTimestamp;
+        TimestampClient tc = null;
+
 		try {
-			nextTimestamp = client.getNextTimestamp();
+            tc = getTimestampClient(true);
+			nextTimestamp = tc.getNextTimestamp();
 		} catch (Exception e) {
             LOG.warn("Unable to fetch new timestamp, will retry", e);
             
@@ -87,12 +123,15 @@ public class ZkTimestampSource implements TimestampSource {
             try {
                 Thread.sleep(100);
                 
-                nextTimestamp = client.getNextTimestamp();
+                nextTimestamp = tc.getNextTimestamp();
             } catch (Exception e2) {
                 LOG.error("Unable to fetch new timestamp", e2);
                 throw new RuntimeException("Unable to fetch new timestamp", e2);
             }
 		}
+		finally {
+		    r.unlock();
+        }
 
 		SpliceLogUtils.debug(LOG, "Next timestamp: %s", nextTimestamp);
 		
@@ -126,10 +165,20 @@ public class ZkTimestampSource implements TimestampSource {
     }
 
     @Override
-    public synchronized void shutdown() {
-        if(_tc != null) {
-            _tc.shutdown();
-            _tc = null;
+    public void shutdown() {
+        try {
+            if (!w.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
+                throw new RuntimeException("Unable to acquire lock for TimestampClient.");
+            if (_tc != null) {
+                _tc.shutdown();
+                _tc = null;
+            }
+        }
+        catch (InterruptedException e) {
+            LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
+        }
+        finally {
+            w.unlock();
         }
     }
 }
