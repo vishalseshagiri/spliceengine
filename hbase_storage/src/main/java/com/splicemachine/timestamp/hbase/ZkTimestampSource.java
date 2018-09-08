@@ -25,6 +25,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
 import org.apache.log4j.Logger;
 
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -78,7 +79,8 @@ public class ZkTimestampSource implements TimestampSource {
     
     protected TimestampClient getTimestampClient() {
         // msirek-temp->
-        boolean initiateShutdown = false;
+        int randomNum = ThreadLocalRandom.current().nextInt(0, 100);
+        boolean initiateShutdown = randomNum == 99;
         if (initiateShutdown)
             shutdown();
         // <-msirek-temp
