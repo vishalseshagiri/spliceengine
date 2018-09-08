@@ -55,83 +55,60 @@ public class ZkTimestampSource implements TimestampSource {
 
     public ZkTimestampSource(SConfiguration config,RecoverableZooKeeper rzk) {
         _rzk = rzk;
-        initialize(config, false);
+        initialize(config);
     }
     
-    private void initialize(SConfiguration config, boolean getReadLock) {
+    private void initialize(SConfiguration config) {
     	// We synchronize because we only want one instance of TimestampClient
     	// per region server, each of which handles multiple concurrent requests.
     	// Should be fine since synchronization occurs on the server.
-        try {
-            if (!w.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
-                throw new RuntimeException("Unable to acquire lock for TimestampClient.");
-            if (_tc == null) {
+    	synchronized(this) {
+    		if (_tc == null) {
+    		    _config = config;
                 rootZkPath = config.getSpliceRootPath();
                 int timeout = config.getTimestampClientWaitTime();
                 int timestampPort = config.getTimestampServerBindPort();
-                LOG.info("Creating the TimestampClient...");
+		    	LOG.info("Creating the TimestampClient...");
                 HBaseConnectionFactory hbcf = HBaseConnectionFactory.getInstance(config);
                 _tc = new TimestampClient(timeout,
-                new HBaseTimestampHostProvider(hbcf, timestampPort));
-                _config = config;
-            }
-        }
-        catch (InterruptedException e) {
-            LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
-        }
-        finally {
-            if (getReadLock) {
-                // Downgrade to a read lock without releasing the write lock.
-                r.lock();
-            }
-            else
-                w.unlock();
-        }
+                        new HBaseTimestampHostProvider(hbcf,timestampPort));
+    		}
+    	}
     }
     
-    protected TimestampClient getTimestampClient(boolean getReadLock) {
+    protected TimestampClient getTimestampClient() {
+        // msirek-temp->
+        boolean initiateShutdown = false;
+        if (initiateShutdown)
+            shutdown();
+        // <-msirek-temp
         if (_tc == null) {
-            initialize(_config, getReadLock);
+            initialize(_config);
             //LOG.error("The timestamp source has been closed.");
             //throw new RuntimeException("The timestamp source has been closed.");
-        }
-        else {
-            try {
-                if (!r.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
-                    throw new RuntimeException("Unable to acquire lock for TimestampClient.");
-            }
-            catch (InterruptedException e) {
-                LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
-            }
         }
     	return _tc;
     }
     
     @Override
     public long nextTimestamp() {
-				
 		long nextTimestamp;
-        TimestampClient tc = null;
-
 		try {
-            tc = getTimestampClient(true);
-			nextTimestamp = tc.getNextTimestamp();
+			nextTimestamp = getTimestampClient().getNextTimestamp();
 		} catch (Exception e) {
             LOG.warn("Unable to fetch new timestamp, will retry", e);
             
 		    // In case of error we are going to reconnect, so we can retry once more and see if we are lucky...
             try {
                 Thread.sleep(100);
-                
-                nextTimestamp = tc.getNextTimestamp();
+                synchronized(this) {
+                    nextTimestamp = getTimestampClient().getNextTimestamp();
+                }
             } catch (Exception e2) {
                 LOG.error("Unable to fetch new timestamp", e2);
                 throw new RuntimeException("Unable to fetch new timestamp", e2);
             }
 		}
-		finally {
-		    r.unlock();
-        }
 
 		SpliceLogUtils.debug(LOG, "Next timestamp: %s", nextTimestamp);
 		
@@ -165,20 +142,10 @@ public class ZkTimestampSource implements TimestampSource {
     }
 
     @Override
-    public void shutdown() {
-        try {
-            if (!w.tryLock(numLockWaitTimeUnits, lockWaitTimeUnits))
-                throw new RuntimeException("Unable to acquire lock for TimestampClient.");
-            if (_tc != null) {
-                _tc.shutdown();
-                _tc = null;
-            }
-        }
-        catch (InterruptedException e) {
-            LOG.warn("Exception while waiting for lock in ZkTimestampSource.", e);
-        }
-        finally {
-            w.unlock();
+    public synchronized void shutdown() {
+        if(_tc != null) {
+            _tc.shutdown();
+            _tc = null;
         }
     }
 }

@@ -14,26 +14,6 @@
 
 package com.splicemachine.timestamp.impl;
 
-import java.lang.management.ManagementFactory;
-import java.net.InetSocketAddress;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import javax.management.InstanceAlreadyExistsException;
-import javax.management.MBeanRegistrationException;
-import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
-import javax.management.NotCompliantMBeanException;
-import javax.management.ObjectName;
-
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.channel.*;
-import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
-import org.jboss.netty.handler.codec.frame.FixedLengthFrameDecoder;
-import org.spark_project.guava.util.concurrent.ThreadFactoryBuilder;
 import com.splicemachine.concurrent.CountDownLatches;
 import com.splicemachine.timestamp.api.Callback;
 import com.splicemachine.timestamp.api.TimestampClientStatistics;
@@ -41,6 +21,21 @@ import com.splicemachine.timestamp.api.TimestampHostProvider;
 import com.splicemachine.timestamp.api.TimestampIOException;
 import com.splicemachine.utils.SpliceLogUtils;
 import org.apache.log4j.Logger;
+import org.jboss.netty.bootstrap.ClientBootstrap;
+import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.buffer.ChannelBuffers;
+import org.jboss.netty.channel.*;
+import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
+import org.jboss.netty.handler.codec.frame.FixedLengthFrameDecoder;
+import org.spark_project.guava.util.concurrent.ThreadFactoryBuilder;
+
+import javax.management.*;
+import java.lang.management.ManagementFactory;
+import java.net.InetSocketAddress;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Accepts concurrent requests for new transactional timestamps and
@@ -77,6 +72,9 @@ public class TimestampClient extends TimestampBaseHandler implements TimestampCl
     private final AtomicReference<State> state = new AtomicReference<>(State.DISCONNECTED);
 
     private ClientBootstrap bootstrap;
+
+    // Make setting of channel atomic.
+    //private final AtomicReference<Channel> channel = new AtomicReference<>(null);  msirek-temp
     private volatile Channel channel;
     private NioClientSocketChannelFactory factory;
 
@@ -209,7 +207,9 @@ public class TimestampClient extends TimestampBaseHandler implements TimestampCl
         }
 
         // Can only assume connecting (not connected) until channelConnected method is invoked
-        state.set(State.CONNECTING);
+        // CONNECTING state has already been set above, so don't reset it here in case the state
+        // has already be asynchronously been set to CONNECTED already.
+        //state.set(State.CONNECTING);
     }
 
     public long getNextTimestamp() throws TimestampIOException {
@@ -317,8 +317,10 @@ public class TimestampClient extends TimestampBaseHandler implements TimestampCl
     @Override
     public void channelConnected(ChannelHandlerContext ctx, ChannelStateEvent e) throws Exception {
         SpliceLogUtils.info(LOG, "Successfully connected to server");
-        channel = e.getChannel();
-        state.set(State.CONNECTED);
+        synchronized (channel) {
+            channel = e.getChannel();
+            state.set(State.CONNECTED);
+        }
         super.channelConnected(ctx, e);
     }
 
@@ -329,10 +331,24 @@ public class TimestampClient extends TimestampBaseHandler implements TimestampCl
         do{
             State s = state.get();
             if(s==State.SHUTDOWN) return; //ignore shut down errors
-            channel=null;
-            shouldContinue = !state.compareAndSet(s,State.DISCONNECTED);
+
+            // If "channel" doesn't equal our current channel, it means some other thread
+            // has started a new connection, so we don't want our disconnection
+            // to affect use of that other channel... just break out.
+            synchronized (channel) {
+                if (channel != e.getChannel())
+                    break;
+
+                channel = null;
+
+                shouldContinue = !state.compareAndSet(s,State.DISCONNECTED) &&
+                                  s != State.DISCONNECTED;
+            }
         }while(shouldContinue);
         connectIfNeeded();
+        // Add missing call to pass the disconnect message to the next ChannelUpstreamHandler.
+        super.channelDisconnected(ctx, e);
+
     }
 
     @Override
