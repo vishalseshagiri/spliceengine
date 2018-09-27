@@ -75,7 +75,7 @@ public class HBaseBulkLoadIndexIT extends SpliceUnitTest {
             spliceClassWatcher.prepareStatement(format("create index O_CUST_IDX on ORDERS(\n" +
                     " O_CUSTKEY,\n" +
                     " O_ORDERKEY\n" +
-                    " ) splitkeys auto hfile location '%s'", getResource("data"))).execute();
+                    " ) splitkeys auto sample fraction 0.1 hfile location '%s'", getResource("data"))).execute();
 
             spliceClassWatcher.prepareStatement(format("create index O_DATE_PRI_KEY_IDX on ORDERS(\n" +
                     " O_ORDERDATE,\n" +
@@ -100,7 +100,7 @@ public class HBaseBulkLoadIndexIT extends SpliceUnitTest {
                     " L_QUANTITY,\n" +
                     " L_SHIPMODE,\n" +
                     " L_SHIPINSTRUCT\n" +
-                    " ) splitkeys auto hfile location '%s'", getResource("data"))).execute();
+                    " ) physical splitkeys location '%s' hfile location '%s'", getResource("l_part_idx.txt"), getResource("data"))).execute();
 
             spliceClassWatcher.prepareStatement(format("call SYSCS_UTIL.COLLECT_SCHEMA_STATISTICS('%s', false)", SCHEMA_NAME)).execute();
             spliceClassWatcher.prepareStatement(format("create table A(c varchar(200))"));
@@ -131,7 +131,7 @@ public class HBaseBulkLoadIndexIT extends SpliceUnitTest {
 
     @AfterClass
     public static void cleanup() throws Exception {
-        testBulkDelete();
+        //testBulkDelete();
         String dir = getResource("data");
         FileUtils.deleteDirectory(new File(dir));
     }
